@@ -1,11 +1,15 @@
+# Imports
+
+import comtypes
+from comtypes import CLSCTX_ALL
 import ctypes
+from ctypes import cast,POINTER
 import sys
 ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
-mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\MarsVoiceAssistant")
-if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\MarsVoiceAssistant") 
+if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS (To keep only one instance running)
     sys.exit(0)
 
-# Imports
 from pystray import Icon, Menu, MenuItem
 from PIL import Image
 import threading
@@ -20,16 +24,117 @@ import psutil
 import pygame
 import subprocess
 from pydualsense import pydualsense
+import vosk
+from vosk import Model, KaldiRecognizer
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import pyautogui as g
+import pyaudio as au
 
 
+# Mic stuff
+FRAMES_PER_BUFFER = 3200
+FORMAT = au.paInt16
+CHANNELS = 1
+RATE = 16000
 
+# Controller IDs
 DUALSENSE_VENDOR_ID = 0x54C
 DUALSENSE_PRODUCT_IDS = [0xCE6, 0xDF2] 
+
+# Paths
 STEAM_PATH = r"D:\Programs\Steam\steam.exe"
+MODEL_PATH = r"D:\Useful\Speech Model\vosk-model-small-en-us-0.15"
+
+# Other Variables
 log_queue = queue.Queue()
 tts_queue = queue.Queue()
 tts_volume = 1.0 
 
+# Vosk setup
+model = None
+recognizer = None
+model_ready = threading.Event()
+
+def _load_models():
+    global model, recognizer
+    print("[Vosk] Loading model...")
+    model = Model(MODEL_PATH)
+    recognizer = KaldiRecognizer(model, RATE)
+    print("[Vosk] Model ready!")
+    model_ready.set()  
+
+
+vol_dict = {'volume': 'number', 0: -65.25, 1: -55.9, 2: -50.9, 3: -47.1, 4: -44.1, 5: -41.6, 6: -39.4, 7: -37.6, 
+            8: -35.9, 9: -34.4, 10: -33.0, 11: -31.7, 12: -30.6, 13: -29.5, 14: -28.5, 15: -27.5, 16: -26.6, 17: -25.8,
+              18: -25.0, 19: -24.2, 20: -23.5, 21: -22.8, 22: -22.2, 23: -21.5, 24: -20.9, 25: -20.3, 26: -19.8, 27: -19.2, 
+              28: -18.7, 29: -18.2, 30: -17.7, 31: -17.2, 32: -16.8, 33: -16.3, 34: -15.9, 35: -15.5, 36: -15.1, 37: -14.7, 
+              38: -14.3, 39: -13.9, 40: -13.5, 41: -13.2, 42: -12.8, 43: -12.5, 44: -12.1, 45: -11.8, 46: -11.5, 47: -11.2, 
+              48: -10.9, 49: -10.6, 50: -10.3, 51: -10.0, 52: -9.7, 53: -9.4, 54: -9.1, 55: -8.8, 56: -8.6, 57: -8.3, 58: -8.1, 
+              59: -7.8, 60: -7.6, 61: -7.3, 62: -7.1, 63: -6.8, 64: -6.6, 65: -6.4, 66: -6.1, 67: -5.9, 68: -5.7, 69: -5.5, 70: -5.3, 
+              71: -5.1, 72: -4.9, 73: -4.6, 74: -4.4, 75: -4.2, 76: -4.0, 77: -3.9, 78: -3.7, 79: -3.5, 80: -3.3, 81: -3.1, 82: -2.9, 
+              83: -2.7, 84: -2.6, 85: -2.4, 86: -2.2, 87: -2.0, 88: -1.9, 89: -1.7, 90: -1.5, 91: -1.4, 92: -1.2, 93: -1.0, 94: -0.9, 
+              95: -0.7, 96: -0.6, 97: -0.4, 98: -0.3, 99: -0.1,100:0.0}
+
+num_dict_ones = {"zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,
+            "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,
+            "eighteen":18,"nineteen":19}
+
+num_dict_tens = {"twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90,}
+
+def convertToNum(sentence):
+    
+    tens = 0
+    ones = 0
+    sentence2 = sentence.split()
+
+    finished_sentence=""
+    next=True
+    
+    for i in range(0,len(sentence2)):
+        if next==False:
+            next=True
+            continue
+        
+        if sentence2[i] in num_dict_tens or sentence2[i] in num_dict_ones:
+            if sentence2[i] in num_dict_tens:
+                tens = num_dict_tens[sentence2[i]]
+                if len(sentence2)>1 and sentence2[i+1] in num_dict_ones:
+                    ones = num_dict_ones[sentence2[i+1]]
+                    final_num = tens+ones
+                    finished_sentence+=str(final_num)+" "
+                    next=False
+                    
+                else:
+                    final_num = tens
+                    finished_sentence+=str(final_num)+" "
+            else:
+                ones = num_dict_ones[sentence2[i]]
+                final_num = ones
+                finished_sentence+=str(final_num)+" "
+        else:
+            finished_sentence+=sentence2[i]+" "
+
+    return finished_sentence
+
+
+def DeviceVolume(mode,num=0,app=None):
+    comtypes.CoInitialize()
+    try:
+        devices = AudioUtilities.GetSpeakers()
+        volume = cast(devices.EndpointVolume,POINTER(IAudioEndpointVolume))
+        if mode.lower() =='set':
+            volume.SetMasterVolumeLevel(vol_dict[num],None)
+            g.press("volumeup")
+            g.press("volumedown")
+        elif mode.lower() == 'get':
+            g.press("volumeup")
+            g.press("volumedown")
+            return int(volume.GetMasterVolumeLevelScalar()*100)
+        else:
+            print("Invalid mode. Use 'set' or 'get'.")
+            
+    finally:
+        comtypes.CoUninitialize()
 
 def queue_add(q, item):
     if q.full():
@@ -38,7 +143,7 @@ def queue_add(q, item):
     else:
         q.put(item)
 
-def _check_dualsense_combo():
+def _check_dualsense():
     result = [False]
     def _check():
         try:
@@ -59,17 +164,18 @@ def _controller_worker():
     
     pygame.joystick.quit()
     pygame.joystick.init()
+    print("Controllers: ", pygame.joystick.get_count())
     was_connected = queue.Queue(3)
     was_connected.put(True)
     was_connected.put(True)
     was_connected.put(False)
 
     while True:
-        print(list(was_connected.queue))
+        
         pygame.joystick.quit()
         pygame.joystick.init()
         connected = pygame.joystick.get_count() > 0
-        print("Controllers: ", pygame.joystick.get_count())
+        
 
         if _steam_running():
             print("Steam already running")
@@ -77,13 +183,12 @@ def _controller_worker():
             continue
 
         if connected and True not in list(was_connected.queue):
-            
+            print("Controllers: ", pygame.joystick.get_count())
             print(" Controller connected!")
             _launch_steam_bigpicture()
        
-        elif _check_dualsense_combo():
-           print(" DualSense combo detected!")
-           _launch_steam_bigpicture()
+        elif _check_dualsense():
+           pass
 
         queue_add(was_connected, connected)
         time.sleep(1)
@@ -100,7 +205,7 @@ def _launch_steam_bigpicture():
     subprocess.Popen([STEAM_PATH, "-bigpicture"])
 
 def playAudio(fname, volume):
-    mixer.init()
+    
     mixer.music.load(fname)
     mixer.music.set_volume(volume)
     mixer.music.play()
@@ -192,6 +297,9 @@ def app_logic():
 
 
 def main():
+    mixer.init()
+    
+
 
     def poll():
         while not log_queue.empty():
@@ -222,6 +330,7 @@ def main():
 
     # Start tray in background thread
     icon = build_tray(root)
+    threading.Thread(target=_load_models, daemon=True).start()
     threading.Thread(target=app_logic, daemon=True).start()
     threading.Thread(target=icon.run, daemon=True).start()
     threading.Thread(target=_tts_worker, daemon=True).start()
