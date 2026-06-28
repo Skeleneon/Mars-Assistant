@@ -1,5 +1,6 @@
 # Imports
 
+import json
 import comtypes
 import ctypes
 from ctypes import cast,POINTER
@@ -28,6 +29,23 @@ from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import pyautogui as g
 import pyaudio as au
 
+# Controller IDs
+DUALSENSE_VENDOR_ID = 0x54C
+DUALSENSE_PRODUCT_IDS = [0xCE6, 0xDF2] 
+
+# Paths
+STEAM_PATH = r"D:\Programs\Steam\steam.exe"
+MODEL_PATH = r"D:\Useful\Speech Model\vosk-model-small-en-us-0.15"
+
+# Other Variables
+log_queue = queue.Queue()
+tts_queue = queue.Queue()
+tts_volume = 1.0 
+
+# Vosk setup
+model = None
+recognizer = None
+
 
 # Audio settings and setup
 FRAMES_PER_BUFFER = 3200
@@ -36,7 +54,7 @@ CHANNELS = 1
 RATE = 16000
 stream = None
 p = None
-mic_ready = threading.Event()
+
 
 IGNORED_INPUT_DEVICES = [
     "Microsoft Sound Mapper",
@@ -80,8 +98,10 @@ def get_input_devices():
         print("No input devices found")
         return []
 
+mic_ready = threading.Event()
 def input_device(device_name=None):
     global stream, p, current_input_device
+    print(f"[Microphone] Setting input device: {device_name or 'System Default'}")
     mic_ready.clear()
     try:
         if stream:
@@ -141,10 +161,15 @@ def get_output_devices():
     else:
         print("No output devices found.")
         return []
-    
+
+speaker_ready = threading.Event()    
 def output_device(device_name=None):
-    p = au.PyAudio()
+    while not mic_ready.is_set():
+        time.sleep(0.1)
     global current_output_device
+    speaker_ready.clear()
+    print(f"[Audio] Setting output device: {device_name or 'System Default'}")
+    p = au.PyAudio()
     try:
         mixer.music.stop()
         mixer.quit()
@@ -158,35 +183,21 @@ def output_device(device_name=None):
     except Exception as e:
         print(f"[Audio] Error initializing mixer: {e}")
     default = p.get_default_output_device_info()["name"]
+    p.terminate()
     current_output_device = device_name or default
     print(f"[Audio] Output device: {device_name or default + '(System Default)'}")
 
-    
+    speaker_ready.set()
 
-# Controller IDs
-DUALSENSE_VENDOR_ID = 0x54C
-DUALSENSE_PRODUCT_IDS = [0xCE6, 0xDF2] 
 
-# Paths
-STEAM_PATH = r"D:\Programs\Steam\steam.exe"
-MODEL_PATH = r"D:\Useful\Speech Model\vosk-model-small-en-us-0.15"
-
-# Other Variables
-log_queue = queue.Queue()
-tts_queue = queue.Queue()
-tts_volume = 1.0 
-
-# Vosk setup
-model = None
-recognizer = None
 model_ready = threading.Event()
-
 def _load_models():
     global model, recognizer
-    print("[Vosk] Loading model...")
+    print("Loading Vosk model...")
+    model_ready.clear()
     model = Model(MODEL_PATH)
     recognizer = KaldiRecognizer(model, RATE)
-    print("[Vosk] Model ready!")
+    print("Vosk Model ready!")
     model_ready.set()  
 
 
@@ -268,6 +279,51 @@ def DeviceVolume(mode,num=0,app=None):
     finally:
         comtypes.CoUninitialize()
 
+audio_queue = queue.Queue()
+text_queue = queue.Queue()
+
+speaking=threading.Event()
+def mic_listen():
+    while not mic_ready.is_set():
+        time.sleep(0.1)
+
+
+    global stream
+    print("[Microphone] Listening...")
+    while True:
+        mic_ready.wait() 
+        if not speaking.is_set():
+            try:
+                chunk = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
+                audio_queue.put(chunk)
+            except Exception as e:
+                print(f"[Microphone] Error: {e}")
+                mic_ready.clear()
+                input_device()
+                time.sleep(2)
+        else:
+            time.sleep(0.3)
+            
+
+def vosk_process():
+    while not model_ready.is_set():
+        time.sleep(0.1)
+    global recognizer
+    print("[Vosk] Vosk processing started...")
+    while True:
+        
+        chunk = audio_queue.get()
+        if recognizer.AcceptWaveform(chunk):
+            result = json.loads(recognizer.Result())
+            if result.get("text"):
+                print(f"User: {result['text']}")
+                text_queue.put(result['text'])
+            
+        
+
+
+
+
 def queue_add(q, item):
     if q.full():
         q.get()  # remove oldest item
@@ -326,7 +382,7 @@ def _controller_worker():
         time.sleep(1)
 
 def _steam_running():
-    return any(p.name().lower() == "steam.exe" for p in psutil.process_iter(["name"]))
+    return any(process.name().lower() == "steam.exe" for process in psutil.process_iter(["name"]))
 
 def _launch_steam_bigpicture():
     if _steam_running():
@@ -337,14 +393,20 @@ def _launch_steam_bigpicture():
     subprocess.Popen([STEAM_PATH, "-bigpicture"])
 
 def playAudio(fname, volume):
-    
+    speaking.set()
+   
     mixer.music.load(fname)
     mixer.music.set_volume(volume)
     mixer.music.play()
     while mixer.music.get_busy():
         time.sleep(0.01)
-    mixer.music.stop()
-    mixer.music.unload()
+    try:
+        mixer.music.stop()
+        mixer.music.unload()
+    except:
+        pass
+    speaking.clear()
+    
 
 def _tts_worker():
     
@@ -418,18 +480,34 @@ def build_tray(root):
 
 
 def app_logic():
+    while not model_ready.is_set() or not mic_ready.is_set() or not speaker_ready.is_set():
+        time.sleep(0.1)
+
     playAudio("assets/startup.mp3", 1.0)
     print("Mars Initialized!")
 
     while True:
-        time.sleep(2)
+        text = text_queue.get()
+        if text == "hello" :
+            speak("Hello! How can I assist you today?")
+        
 
 
+import logging
+logging.basicConfig(
+    filename="logs/mars_errors.log",
+    level=logging.ERROR,
+    format="%(asctime)s %(message)s"
+)
 
+def log_exception(exc_type, exc_value, exc_traceback):
+    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = log_exception
 
 
 def main():
-    mixer.init()
+
     
 
 
@@ -462,8 +540,15 @@ def main():
 
     # Start tray in background thread
     icon = build_tray(root)
+    #initialization threads
+    print("Initializing...")
     threading.Thread(target=_load_models, daemon=True).start()
-    threading.Thread(target=load_microphone, daemon=True).start()
+    threading.Thread(target=input_device, daemon=True).start()
+    threading.Thread(target=output_device, daemon=True).start()
+
+    #loop threads
+    threading.Thread(target=mic_listen, daemon=True).start()
+    threading.Thread(target=vosk_process, daemon=True).start()
     threading.Thread(target=app_logic, daemon=True).start()
     threading.Thread(target=icon.run, daemon=True).start()
     threading.Thread(target=_tts_worker, daemon=True).start()
