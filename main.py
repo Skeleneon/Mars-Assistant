@@ -1,7 +1,6 @@
 # Imports
 
 import comtypes
-from comtypes import CLSCTX_ALL
 import ctypes
 from ctypes import cast,POINTER
 import sys
@@ -24,18 +23,145 @@ import psutil
 import pygame
 import subprocess
 from pydualsense import pydualsense
-import vosk
 from vosk import Model, KaldiRecognizer
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import pyautogui as g
 import pyaudio as au
 
 
-# Mic stuff
+# Audio settings and setup
 FRAMES_PER_BUFFER = 3200
 FORMAT = au.paInt16
 CHANNELS = 1
 RATE = 16000
+stream = None
+p = None
+mic_ready = threading.Event()
+
+IGNORED_INPUT_DEVICES = [
+    "Microsoft Sound Mapper",
+    "Primary Sound Capture Driver",
+    "Primary Sound Driver",
+]
+
+IGNORED_OUTPUT_DEVICES = [
+    "Microsoft Sound Mapper",
+    "Primary Sound Driver",
+]
+
+current_output_device = None
+current_input_device = None
+
+def get_input_devices():
+    pa = au.PyAudio()
+    devices = []
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if info["maxInputChannels"] > 0:
+            name = info["name"]
+            if any(ignored in name for ignored in IGNORED_INPUT_DEVICES):
+                continue
+            try:
+                test = pa.open(format=FORMAT, channels=CHANNELS, rate=RATE,
+                               input=True, input_device_index=i,
+                               frames_per_buffer=FRAMES_PER_BUFFER)
+                test.close()
+                overlap = next((d for d in devices if name in d or d in name), None)
+                if overlap is None:
+                    devices.append(name)
+                elif len(name) > len(overlap):  # new name is longer → replace
+                    devices[devices.index(overlap)] = name
+            except:
+                pass
+    pa.terminate()
+    if devices:
+        return devices
+    else:
+        print("No input devices found")
+        return []
+
+def input_device(device_name=None):
+    global stream, p, current_input_device
+    mic_ready.clear()
+    try:
+        if stream:
+            stream.stop_stream()
+            stream.close()
+        if p:
+            p.terminate()
+    except Exception as e:
+        print(f"[Microphone] Error closing stream: {e}")
+    
+    try:
+        p = au.PyAudio()
+        device_index = None
+        if device_name:
+            for i in range(p.get_device_count()):
+                info = p.get_device_info_by_index(i)
+                if (info["name"] in device_name or device_name in info["name"]) and info["maxInputChannels"] > 0:
+                    device_index = i
+                    break
+        default = p.get_default_input_device_info()["name"]
+        stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE,
+                        input=True, input_device_index=device_index,
+                        frames_per_buffer=FRAMES_PER_BUFFER)
+        current_input_device = device_name or default
+        print(f"[Microphone] Input device: {device_name or default + '(System Default)'}")
+        mic_ready.set()
+    except Exception as e:
+        print(f"[Microphone] Error: {e}")
+
+
+
+def get_output_devices():
+    pa = au.PyAudio()
+    devices = []
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if info["maxOutputChannels"] > 0:
+            name = info["name"]
+            if any(ignored in name for ignored in IGNORED_OUTPUT_DEVICES):
+                continue
+            try:
+                test = pa.open(format=au.paFloat32, channels=1, rate=44100,
+                               output=True, output_device_index=i,
+                               frames_per_buffer=512)
+                test.close()
+                overlap = next((d for d in devices if name in d or d in name), None)
+                if overlap is None:
+                    devices.append(name)
+                elif len(name) > len(overlap):  # new name is longer → replace
+                    devices[devices.index(overlap)] = name
+            except:
+                pass
+    pa.terminate()
+
+    if devices:
+        return devices
+    else:
+        print("No output devices found.")
+        return []
+    
+def output_device(device_name=None):
+    p = au.PyAudio()
+    global current_output_device
+    try:
+        mixer.music.stop()
+        mixer.quit()
+    except Exception as e:
+        print(f"[Audio] Error stopping mixer: {e}")
+        print("[Audio] Reinitializing mixer...")
+        mixer.init()
+        print("[Audio] Mixer reinitialized with default output device.")
+    try:
+        mixer.init(devicename=device_name)
+    except Exception as e:
+        print(f"[Audio] Error initializing mixer: {e}")
+    default = p.get_default_output_device_info()["name"]
+    current_output_device = device_name or default
+    print(f"[Audio] Output device: {device_name or default + '(System Default)'}")
+
+    
 
 # Controller IDs
 DUALSENSE_VENDOR_ID = 0x54C
@@ -98,6 +224,12 @@ def convertToNum(sentence):
         if sentence2[i] in num_dict_tens or sentence2[i] in num_dict_ones:
             if sentence2[i] in num_dict_tens:
                 tens = num_dict_tens[sentence2[i]]
+                try:
+                    a = sentence2[i+1]
+                except: 
+                    final_num = tens
+                    finished_sentence+=str(final_num)+" "
+                    continue
                 if len(sentence2)>1 and sentence2[i+1] in num_dict_ones:
                     ones = num_dict_ones[sentence2[i+1]]
                     final_num = tens+ones
@@ -331,6 +463,7 @@ def main():
     # Start tray in background thread
     icon = build_tray(root)
     threading.Thread(target=_load_models, daemon=True).start()
+    threading.Thread(target=load_microphone, daemon=True).start()
     threading.Thread(target=app_logic, daemon=True).start()
     threading.Thread(target=icon.run, daemon=True).start()
     threading.Thread(target=_tts_worker, daemon=True).start()
