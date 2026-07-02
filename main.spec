@@ -5,9 +5,12 @@
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[('subfiles/hidapi.dll', '.')],
+    binaries=[
+('subfiles/hidapi.dll', '.'),
+(r'C:\Users\amans\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\vosk', 'vosk'),
+],
     datas=[('assets', 'assets')],
-    hiddenimports=['pydualsense'],
+    hiddenimports=['pydualsense', 'vosk'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
