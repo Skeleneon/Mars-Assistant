@@ -45,7 +45,7 @@ sys.excepthook = log_exception
 
 
 
-settings={}
+
 
 # Controller IDs
 DUALSENSE_VENDOR_ID = 0x54C
@@ -56,10 +56,7 @@ STEAM_PATH = r"D:\Programs\Steam\steam.exe"
 MODEL_PATH = r"D:\Useful\Speech Model\vosk-model-small-en-us-0.15"
 
 # Other Variables
-tts_volume = 1.0 
-current_output_device = None
-current_input_device = None
-speech=None
+settings={}
 
 # Vosk setup
 model = None
@@ -146,15 +143,20 @@ def get_input_devices(silent=False):
             print("[Error] No input devices found")
         return []
 
+def change_settings(setting_name, value):
+    global settings
+    settings[setting_name] = value
+    with open("subfiles/settings.dat", "wb") as f:
+        pickle.dump(settings, f)
 
 def input_device(device_name=None):
-    global stream, p, current_input_device
+    global stream, p, settings
     print(f"[System] Setting input device: {device_name or 'System Default'}")
     mic_ready.clear()
     if device_name == "Default Input":
         device_name = None
     if get_input_devices() == []:
-        current_input_device = None
+        change_settings("current_input_device", None)
         mic_ready.set()
         return
     try:
@@ -179,13 +181,13 @@ def input_device(device_name=None):
         stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE,
                         input=True, input_device_index=device_index,
                         frames_per_buffer=FRAMES_PER_BUFFER)
-        current_input_device = device_name or default
+        change_settings("current_input_device", (device_name or default) )
         
         print(f"[System] Input device set to: {device_name or default + '(System Default)'}")
         mic_ready.set()
     except Exception as e:
         print(f"[Error] while setting input device: {e}")
-        current_input_device = None
+        change_settings("current_input_device", None)
         mic_ready.set()
 
 def get_output_devices(silent=False):
@@ -223,12 +225,12 @@ def output_device(device_name=None):
         time.sleep(0.1)
 
 
-    global current_output_device
+    
     speaker_ready.clear()
     if device_name == "Default Output":
         device_name = None
     if get_output_devices() == []:
-        current_output_device = None
+        change_settings("current_output_device", None)
         speaker_ready.set()
         return
     else:
@@ -247,20 +249,16 @@ def output_device(device_name=None):
         print(f"[Error] while initializing mixer: {e}")
     default = p.get_default_output_device_info()["name"]
     p.terminate()
-    current_output_device = device_name or default
+    change_settings("current_output_device", (device_name or default) )
     print(f"[System] Output device: {device_name or default + '(System Default)'}")
     
 
     speaker_ready.set()
 
 def _load_stuff():
-    global tts_volume, current_input_device, current_output_device, speech
     global model, recognizer, settings
+    model_ready.clear()
     settings=pickle.load(open("subfiles/settings.dat", "rb"))
-    tts_volume = settings["tts_volume"]
-    current_input_device = settings["input_device"]
-    current_output_device = settings["output_device"]
-    speech=settings["speech"]
     settings_ready.set()
     print("[System] Loading Vosk model...")
     model_ready.clear()
@@ -311,7 +309,7 @@ def convertToNum(sentence):
         else:
             finished_sentence+=sentence2[i]+" "
 
-    return finished_sentence
+    return finished_sentence.strip()
 
 def DeviceVolume(mode,num=0,app=None):
     comtypes.CoInitialize()
@@ -366,12 +364,13 @@ def vosk_process():
         if recognizer.AcceptWaveform(chunk):
             result = json.loads(recognizer.Result())
             if result.get("text"):
-                print(f"[User] {result['text']}")
-                text_queue.put(result['text'])
+                processed_text = convertToNum(result['text'])
+                print(f"[User] {processed_text}")
+                text_queue.put(processed_text)
             
 def queue_add(q, item):
     if q.full():
-        q.get()  # remove oldest item
+        q.get()  
         q.put(item)
     else:
         q.put(item)
@@ -433,7 +432,7 @@ def _launch_steam_bigpicture():
         print("[System] Steam already running, skipping launch")
         return
     print("[System] Launching Steam Big Picture")
-    if speech:
+    if settings.get("speech", True):
         speak("Launching Steam")
     else:
         playAudio("assets/sounds/hotkey.wav", 1.0)
@@ -442,7 +441,7 @@ def _launch_steam_bigpicture():
 def playAudio(fname, volume):
     speaking.set()
 
-    if current_output_device is None:
+    if settings.get("current_output_device") is None:
         speaking.clear()
         return
    
@@ -501,7 +500,7 @@ def _tts_worker():
 
 settings_window = None
 def open_settings(root):
-    global settings_window, current_input_device, current_output_device, tts_volume, speech
+    global settings_window
 
     
 
@@ -547,7 +546,7 @@ def open_settings(root):
     input_frame.pack(fill="x")
 
     label(input_frame, "Input Device")
-    input_var = tk.StringVar(value=current_input_device or "System Default")
+    input_var = tk.StringVar(value=settings.get("current_input_device") or "System Default")
     input_menu = tk.OptionMenu(input_frame, input_var, "")
     input_menu.configure(bg="#2a2a2a", fg="white", activebackground="#3a3a3a",
                             font=("Consolas", 10), highlightthickness=0)
@@ -558,7 +557,7 @@ def open_settings(root):
     
 
 
-    if current_input_device is not None:
+    if settings.get("current_input_device") is not None:
         
         input_menu.pack(fill="x", padx=20)
         input_menu["menu"].configure(postcommand=refresh_input_menu)
@@ -587,7 +586,7 @@ def open_settings(root):
 
     # --- Output Device ---
     label(output_frame, "Output Device")
-    output_var = tk.StringVar(value=current_output_device or "System Default")
+    output_var = tk.StringVar(value=settings.get("current_output_device") or "System Default")
     output_menu = tk.OptionMenu(output_frame, output_var, "")
     output_menu.configure(bg="#2a2a2a", fg="white", activebackground="#3a3a3a",
                             font=("Consolas", 10), highlightthickness=0)
@@ -596,7 +595,7 @@ def open_settings(root):
                  font=("Consolas", 10))
     
 
-    if current_output_device is not None:
+    if settings.get("current_output_device") is not None:
         output_menu.pack(fill="x", padx=20)
         output_menu["menu"].configure(postcommand=refresh_output_menu)
         output_var.trace_add("write", on_output_change)
@@ -609,10 +608,10 @@ def open_settings(root):
     separator()
 
     def refresh_on_none():
-        global current_input_device, current_output_device,mic_ready,speaker_ready
+        global mic_ready,speaker_ready
         mic_ready.clear()
         speaker_ready.clear()
-        if current_input_device is None:
+        if settings.get("current_input_device") is None:
             threading.Thread(target=mic_listen, daemon=True).start()
        
         input_device()
@@ -620,7 +619,7 @@ def open_settings(root):
         def _retry():
 
             input_device()
-            if current_input_device is not None and current_output_device is not None:
+            if settings.get("current_input_device") is not None and settings.get("current_output_device") is not None:
                 settings_window.after(0, _update_ui)
 
         def _update_ui():
@@ -632,12 +631,12 @@ def open_settings(root):
 
             input_menu.pack(fill="x", padx=20)
             input_menu["menu"].configure(postcommand=refresh_input_menu)
-            input_var.set(current_input_device)
+            input_var.set(settings.get("current_input_device"))
             input_var.trace_add("write", on_input_change)
 
             output_menu.pack(fill="x", padx=20)
             output_menu["menu"].configure(postcommand=refresh_output_menu)
-            output_var.set(current_output_device)
+            output_var.set(settings.get("current_output_device"))
             output_var.trace_add("write", on_output_change)
 
         threading.Thread(target=_retry, daemon=True).start()
@@ -652,16 +651,14 @@ def open_settings(root):
 
     # --- TTS Volume ---
     label(settings_window, "TTS Volume")
-    volume_var = tk.DoubleVar(value=tts_volume)
+    volume_var = tk.DoubleVar(value=settings.get("tts_volume", 1.0))
     volume_slider = tk.Scale(settings_window, variable=volume_var, from_=0.0, to=1.0,
                              resolution=0.05, orient="horizontal", bg="#1a1a1a", fg="white",
                              troughcolor="#333333", highlightthickness=0, font=("Consolas", 9))
     volume_slider.pack(fill="x", padx=20)
 
     def on_volume_change(*args):
-        global tts_volume
-        tts_volume = volume_var.get()
-        settings["tts_volume"] = tts_volume
+        change_settings("tts_volume", volume_var.get())
     volume_var.trace_add("write", on_volume_change)
 
     separator()
@@ -696,15 +693,14 @@ def open_settings(root):
         return canvas
 
     def on_speech_change(val):
-        global speech
-        speech = val
+        change_settings("speech", val)
 
     toggle_switch(settings_window,
                   initial=settings.get("speech", True),
                   on_change=on_speech_change).pack(anchor="w", padx=20, pady=5)
 
 def speak(text, volume="default"):
-    global tts_volume
+    
     
     
     if not text:
@@ -719,10 +715,10 @@ def speak(text, volume="default"):
 
     print(f"[Mars] {text}")
 
-    if not speech:
+    if not settings.get("speech", True):
         return
 
-    vol = tts_volume if volume == "default" else volume
+    vol = settings.get("tts_volume", 1.0) if volume == "default" else volume
 
     
     tts_queue.put((text, vol))
@@ -738,12 +734,7 @@ def build_tray(root):
     def show(icon, item): root.after(0, root.deiconify)
     def show_settings(icon, item): root.after(0, lambda: open_settings(root));show(icon, item)
     def quit_app(icon, item):
-        settings["tts_volume"] = tts_volume
-        settings["input_device"] = current_input_device
-        settings["output_device"] = current_output_device
-        settings["speech"] = speech
-        with open("subfiles/settings.dat", "wb") as f:
-            pickle.dump(settings, f)
+        print("[System] Quitting...")
         icon.stop()
         root.after(0, root.destroy)
 
@@ -758,14 +749,14 @@ def build_tray(root):
 
 
 def audio_manager():
-    global current_input_device, current_output_device
+    
     while not mic_ready.is_set() or not speaker_ready.is_set():
         time.sleep(0.1)
     while True:
         if get_input_devices(silent=True) == []:
-            current_input_device = None
+            change_settings("current_input_device", None)
         if get_output_devices(silent=True) == []:
-            current_output_device = None
+            change_settings("current_output_device", None)
         time.sleep(1)
 
 def app_logic():
@@ -790,6 +781,7 @@ def app_logic():
         text = text_queue.get()
         
         if text == "hello" :
+            
             speak("Hello! How can I assist you today?")
         
         
